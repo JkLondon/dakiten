@@ -28,6 +28,7 @@
 #include <QList>
 #include <QPair>
 #include <QScrollBar>
+#include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
@@ -38,9 +39,12 @@
 #include "entrylist.h"
 #include "entrylistmodel.h"
 #include "entrylistview.h"
+#include "kanjipage.h"
 #include "kitenconfig.h"
 #include "resultsview.h"
+#include "searchresultspage.h"
 #include "searchstringinput.h"
+#include "wordpage.h"
 
 using namespace Qt::StringLiterals;
 
@@ -59,8 +63,16 @@ Kiten::Kiten(QWidget *parent, const char *name)
     _config = KitenConfigSkeleton::self();
     _config->load();
 
-    /* ResultsView is our main widget, displaying the results of a search */
-    _mainView = new ResultsView(this, "mainView");
+    /* Set up the page stack with three pages */
+    _pageStack = new QStackedWidget(this);
+
+    _searchResultsPage = new SearchResultsPage(this);
+    _kanjiPage = new KanjiPage(this);
+    _wordPage = new WordPage(this);
+
+    _pageStack->addWidget(_searchResultsPage); // index 0
+    _pageStack->addWidget(_kanjiPage);         // index 1
+    _pageStack->addWidget(_wordPage);          // index 2
 
     /* Create the export list */
     //	setupExportListDock();
@@ -69,7 +81,7 @@ Kiten::Kiten(QWidget *parent, const char *name)
     detachedView = new ResultsView( NULL, "detachedView" );
     */
 
-    setCentralWidget(_mainView);
+    setCentralWidget(_pageStack);
 
     setupActions();
     // Be sure to create this manager before creating the GUI
@@ -87,12 +99,21 @@ Kiten::Kiten(QWidget *parent, const char *name)
     updateConfiguration();
     applyMainWindowSettings(KSharedConfig::openStateConfig()->group(QStringLiteral("kitenWindow")));
 
-    /* What happens when links are clicked or things are selected in the clipboard */
-    connect(_mainView, &ResultsView::urlClicked, this, &Kiten::searchText);
+    /* Connect SearchResultsPage signals for kanji/word navigation */
+    connect(_searchResultsPage, &SearchResultsPage::kanjiClicked, this, &Kiten::navigateToKanji);
+    connect(_searchResultsPage, &SearchResultsPage::wordSearchRequested, this, &Kiten::searchText);
+
+    /* Connect KanjiPage signals */
+    connect(_kanjiPage, &KanjiPage::kanjiClicked, this, &Kiten::navigateToKanji);
+    connect(_kanjiPage, &KanjiPage::wordClicked, this, &Kiten::navigateToWord);
+
+    /* Connect WordPage signals */
+    connect(_wordPage, &WordPage::kanjiClicked, this, &Kiten::navigateToKanji);
+
     connect(QApplication::clipboard(), &QClipboard::selectionChanged, this, &Kiten::searchClipboard);
     connect(_inputManager, &SearchStringInput::search, this, &Kiten::searchFromEdit);
 
-    connect(_mainView->verticalScrollBar(), &QAbstractSlider::valueChanged, this, &Kiten::setCurrentScrollValue);
+    connect(_searchResultsPage->resultsView()->verticalScrollBar(), &QAbstractSlider::valueChanged, this, &Kiten::setCurrentScrollValue);
     /* We need to know when to reload our dictionaries if the user updated them. */
     connect(_dictionaryUpdateManager, &DictionaryUpdateManager::updateFinished, this, &Kiten::loadDictionaries);
 
@@ -233,7 +254,7 @@ void Kiten::finishInit()
 
 void Kiten::focusResultsView()
 {
-    _mainView->verticalScrollBar()->setFocus();
+    _searchResultsPage->resultsView()->verticalScrollBar()->setFocus();
 }
 
 // This function is run on program window close.
@@ -372,6 +393,11 @@ void Kiten::searchAndDisplay(const DictQuery &query)
 
     /* suppose it's about time to show the users the results. */
     displayResults(results);
+
+    /* Track this in page history */
+    if (!_navigatingHistory) {
+        pushPageState({PageType::SearchResults, QVariant()});
+    }
 }
 
 /**
@@ -388,6 +414,10 @@ void Kiten::searchInResults()
     addHistory(results);
     _inputManager->setSearchQuery(searchQuery);
     displayResults(results);
+
+    if (!_navigatingHistory) {
+        pushPageState({PageType::SearchResults, QVariant()});
+    }
 }
 
 /**
@@ -408,6 +438,7 @@ void Kiten::displayResults(EntryList *results)
 
     /* sort the results */
     /* synchronize the results window */
+    ResultsView *view = _searchResultsPage->resultsView();
     if (results->count() > 0) {
         QStringList dictSort;
         QStringList fieldSort = _config->field_sortlist();
@@ -415,19 +446,15 @@ void Kiten::displayResults(EntryList *results)
             dictSort = _config->dictionary_sortlist();
         }
         results->sort(fieldSort, dictSort);
-        _mainView->setContents(results->toHTML());
+        view->setContents(results->toHTML());
     } else {
-        _mainView->setContents("<html><body>"_L1 + infoStr + "</body></html>"_L1);
+        view->setContents("<html><body>"_L1 + infoStr + "</body></html>"_L1);
     }
 
-    _mainView->setLaterScrollValue(results->scrollValue());
+    view->setLaterScrollValue(results->scrollValue());
 
-    /* //Debuggery: to print the html results to file:
-    QFile file( "/tmp/lala" );
-    file.open( QIODevice::WriteOnly );
-    file.write( results->toHTML().toUtf8() );
-    file.close();
-    */
+    /* Show the search results page */
+    _pageStack->setCurrentWidget(_searchResultsPage);
 }
 
 void Kiten::radicalSearch()
@@ -442,6 +469,55 @@ void Kiten::kanjiBrowserSearch()
     // KanjiBrowser is a KUniqueApplication, so we don't
     // need to worry about opening more than one copy
     _kanjibrowser_proc->start();
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// NAVIGATION METHODS
+//////////////////////////////////////////////////////////////////////////////
+
+void Kiten::navigateToKanji(const QChar &kanji)
+{
+    _kanjiPage->setKanji(kanji, &_dictionaryManager);
+    _pageStack->setCurrentWidget(_kanjiPage);
+    _statusBar->showMessage(i18n("Kanji: %1", QString(kanji)));
+    setCaption(i18n("Kanji: %1", QString(kanji)));
+
+    if (!_navigatingHistory) {
+        pushPageState({PageType::Kanji, QVariant(kanji)});
+    }
+    enableHistoryButtons();
+}
+
+void Kiten::navigateToWord(const QString &word, const QString &reading)
+{
+    _wordPage->setWord(word, reading, &_dictionaryManager);
+    _pageStack->setCurrentWidget(_wordPage);
+    _statusBar->showMessage(i18n("Word: %1", word));
+    setCaption(i18n("Word: %1", word));
+
+    if (!_navigatingHistory) {
+        pushPageState({PageType::Word, QVariant(QStringList{word, reading})});
+    }
+    enableHistoryButtons();
+}
+
+void Kiten::showSearchResults()
+{
+    _pageStack->setCurrentWidget(_searchResultsPage);
+    if (_historyList.current()) {
+        _inputManager->setSearchQuery(_historyList.current()->getQuery());
+    }
+    enableHistoryButtons();
+}
+
+void Kiten::pushPageState(const PageState &state)
+{
+    // Truncate any forward history
+    if (_pageHistoryIndex >= 0 && _pageHistoryIndex < _pageHistory.size() - 1) {
+        _pageHistory.resize(_pageHistoryIndex + 1);
+    }
+    _pageHistory.append(state);
+    _pageHistoryIndex = _pageHistory.size() - 1;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -606,8 +682,36 @@ void Kiten::addHistory(EntryList *result)
  */
 void Kiten::back()
 {
-    _historyList.prev();
-    displayHistoryItem();
+    // First try page history (kanji/word pages)
+    if (_pageHistoryIndex > 0) {
+        _pageHistoryIndex--;
+        _navigatingHistory = true;
+
+        const PageState &state = _pageHistory.at(_pageHistoryIndex);
+        switch (state.type) {
+        case PageType::SearchResults:
+            // Also go back in the search history
+            _historyList.prev();
+            displayHistoryItem();
+            break;
+        case PageType::Kanji: {
+            QChar kanji = state.data.toChar();
+            navigateToKanji(kanji);
+            break;
+        }
+        case PageType::Word: {
+            QStringList wordData = state.data.toStringList();
+            if (wordData.size() >= 2) {
+                navigateToWord(wordData.at(0), wordData.at(1));
+            }
+            break;
+        }
+        }
+
+        _navigatingHistory = false;
+        enableHistoryButtons();
+        return;
+    }
 }
 
 /**
@@ -615,8 +719,34 @@ void Kiten::back()
  */
 void Kiten::forward()
 {
-    _historyList.next();
-    displayHistoryItem();
+    if (_pageHistoryIndex < _pageHistory.size() - 1) {
+        _pageHistoryIndex++;
+        _navigatingHistory = true;
+
+        const PageState &state = _pageHistory.at(_pageHistoryIndex);
+        switch (state.type) {
+        case PageType::SearchResults:
+            _historyList.next();
+            displayHistoryItem();
+            break;
+        case PageType::Kanji: {
+            QChar kanji = state.data.toChar();
+            navigateToKanji(kanji);
+            break;
+        }
+        case PageType::Word: {
+            QStringList wordData = state.data.toStringList();
+            if (wordData.size() >= 2) {
+                navigateToWord(wordData.at(0), wordData.at(1));
+            }
+            break;
+        }
+        }
+
+        _navigatingHistory = false;
+        enableHistoryButtons();
+        return;
+    }
 }
 
 /**
@@ -645,8 +775,8 @@ void Kiten::displayHistoryItem()
  */
 void Kiten::enableHistoryButtons()
 {
-    _backAction->setEnabled(_historyList.index() > 0);
-    _forwardAction->setEnabled(_historyList.index() + 1 < _historyList.count());
+    _backAction->setEnabled(_pageHistoryIndex > 0);
+    _forwardAction->setEnabled(_pageHistoryIndex < _pageHistory.size() - 1);
 }
 
 void Kiten::setCurrentScrollValue(int value)

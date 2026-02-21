@@ -21,13 +21,19 @@ target_sources(kiten_bin PRIVATE
     entrylistmodel.h
     entrylistview.cpp
     entrylistview.h
+    kanjipage.cpp
+    kanjipage.h
     kiten.cpp
     kiten.h
     main.cpp
     resultsview.cpp
     resultsview.h
+    searchresultspage.cpp
+    searchresultspage.h
     searchstringinput.cpp
     searchstringinput.h
+    wordpage.cpp
+    wordpage.h
 
     kiten.qrc
 )

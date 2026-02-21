@@ -14,6 +14,9 @@
 
 #include <KXmlGuiWindow>
 
+#include <QVariant>
+#include <QList>
+
 #include "dictionarymanager.h"
 #include "dictquery.h"
 #include "entry.h"
@@ -21,6 +24,7 @@
 
 class QAction;
 class KProcess;
+class QStackedWidget;
 class QStatusBar;
 class KToggleAction;
 class KitenConfigSkeleton;
@@ -30,8 +34,11 @@ class QDockWidget;
 class ConfigureDialog;
 class DictionaryUpdateManager;
 class EntryListView;
+class KanjiPage;
 class ResultsView;
+class SearchResultsPage;
 class SearchStringInput;
+class WordPage;
 
 class Kiten : public KXmlGuiWindow
 {
@@ -67,6 +74,11 @@ private Q_SLOTS:
     void radicalSearch();
     void kanjiBrowserSearch();
 
+    // Navigation slots for kanji/word pages
+    void navigateToKanji(const QChar &kanji);
+    void navigateToWord(const QString &word, const QString &reading);
+    void showSearchResults();
+
     // Configuration related slots
     void slotConfigure();
     void configureToolBars();
@@ -88,11 +100,35 @@ private Q_SLOTS:
     void setCurrentScrollValue(int value);
 
 private:
+    // Page type identifiers for navigation history
+    enum class PageType {
+        SearchResults,
+        Kanji,
+        Word,
+    };
+
+    struct PageState {
+        PageType type;
+        QVariant data; // QChar for Kanji, QStringList{word,reading} for Word
+    };
+
+    void pushPageState(const PageState &state);
+
     QStatusBar *_statusBar = nullptr;
     DictionaryManager _dictionaryManager;
     DictionaryUpdateManager *_dictionaryUpdateManager = nullptr;
     SearchStringInput *_inputManager = nullptr;
-    ResultsView *_mainView = nullptr;
+
+    // Page stack navigation
+    QStackedWidget *_pageStack = nullptr;
+    SearchResultsPage *_searchResultsPage = nullptr;
+    KanjiPage *_kanjiPage = nullptr;
+    WordPage *_wordPage = nullptr;
+
+    // Page navigation history
+    QList<PageState> _pageHistory;
+    int _pageHistoryIndex = -1;
+    bool _navigatingHistory = false;
 
     DictQuery _lastQuery;
     KToggleAction *_autoSearchToggle = nullptr;
